@@ -29,6 +29,7 @@
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import fs from 'node:fs';
 
 const name = 'dsh-plugin-degen-investigator';
 
@@ -37,24 +38,75 @@ const name = 'dsh-plugin-degen-investigator';
  *
  * This plugin installs as a pnpm *symlink* into the profile's `node_modules`,
  * so a static `import` resolves from the plugin's real path (outside the DSH
- * tree) and fails. Anchoring a `createRequire` to a path *inside* the DSH tree
- * (the profile dir, or a walk-up from a real-dir install) resolves the package
- * correctly. Tries the most reliable anchors first.
+ * tree) and fails. Anchoring a `createRequire` to a file *inside* a DSH tree
+ * (a dir that owns a `node_modules` containing the package) resolves it
+ * correctly.
+ *
+ * IMPORTANT: the running `dsh` host process does NOT carry `DSH_PROFILE_DIR`
+ * (nor any other `DSH_*` variable) in its own environment — those are injected
+ * only into *child shells* by the `dsh-shell-env` plugin. An anchor ladder that
+ * trusts that env var therefore dies inside the host. The ladder below covers
+ * every real-world placement:
+ *
+ *   1. `$DSH_PROFILE_DIR` (setups that export it; honors the profile's own
+ *      pinned copies of DSH packages),
+ *   2. a walk-up from this file's real path (real-dir installs sitting inside
+ *      a DSH tree),
+ *   3. the DSH distribution that spawned this process (`process.argv[1]` is
+ *      the `dsh` bin; its realpath lives inside `@deepseek-ai/dsh`, whose
+ *      `node_modules` holds every DSH package) — the anchor that saves the
+ *      stock `dsh web` host,
+ *   4. the DSH distribution co-located with the running node binary (mise/npm
+ *      prefix layout: `<node root>/lib/node_modules/@deepseek-ai/dsh`) —
+ *      covers dev/test processes where `argv[1]` is not the dsh bin.
  */
 function loadDsh(specifier) {
   const anchors = [];
-  if (process.env.DSH_PROFILE_DIR) anchors.push(path.join(process.env.DSH_PROFILE_DIR, 'index.js'));
-  try {
-    const real = new URL('index.js', import.meta.url).pathname;
+  const seen = new Set();
+  const add = (candidate) => {
+    if (!candidate || typeof candidate !== 'string') return;
+    let real = candidate;
+    try {
+      real = fs.realpathSync(candidate);
+    } catch {
+      /* keep the candidate as-is; resolution may still succeed */
+    }
+    if (seen.has(real)) return;
+    seen.add(real);
     anchors.push(real);
+  };
+
+  // 1. explicit profile dir
+  if (process.env.DSH_PROFILE_DIR) add(path.join(process.env.DSH_PROFILE_DIR, 'index.js'));
+
+  // 2. walk-up from this file's real path
+  try {
+    let real = new URL('./index.js', import.meta.url).pathname;
+    add(real);
     let dir = path.dirname(real);
     for (let i = 0; i < 8 && dir.length > 1; i++) {
-      anchors.push(path.join(dir, 'index.js'));
+      add(path.join(dir, 'index.js'));
       dir = path.dirname(dir);
     }
   } catch {
-    /* import.meta.url unavailable; rely on the profile-dir anchor */
+    /* import.meta.url unavailable; lean on the remaining tiers */
   }
+
+  // 3. the DSH distribution that spawned this process
+  try {
+    if (process.argv[1]) add(fs.realpathSync(process.argv[1]));
+  } catch {
+    /* argv[1] unusable */
+  }
+
+  // 4. the DSH distribution co-located with the running node binary
+  try {
+    const nodeRoot = path.dirname(path.dirname(fs.realpathSync(process.execPath)));
+    add(path.join(nodeRoot, 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'));
+  } catch {
+    /* execPath unusable */
+  }
+
   let lastErr;
   for (const anchor of anchors) {
     try {
@@ -63,7 +115,9 @@ function loadDsh(specifier) {
       lastErr = err;
     }
   }
-  throw new Error(`dsh-plugin-degen-investigator: cannot resolve ${specifier} from the DSH tree: ${lastErr?.message ?? lastErr}`);
+  throw new Error(
+    `dsh-plugin-degen-investigator: cannot resolve ${specifier} from the DSH tree. Tried anchors: ${anchors.join(', ')} (last error: ${lastErr?.message ?? lastErr})`,
+  );
 }
 
 const z = loadDsh('@deepseek-ai/schemastery');
@@ -520,28 +574,35 @@ export function apply(ctx, config) {
     });
 
     // Commit directly so the report renders immediately (a spliced-only message
-    // would stay invisible until the next claim). Fall back to the inbox if a
-    // direct append is rejected in the current session state.
+    // would stay invisible until the next claim). If a direct append is
+    // rejected in the current session state, park the report in the agent
+    // inbox: it joins the session at the next claim and still reaches the
+    // user. Never lose the report silently.
     try {
       agent.session.append('user/message', message, { surfaceOp: 'append' });
     } catch {
       try {
         agent.inject(message);
-      } catch {
-        // Last resort: log to the session event stream as a plain notice.
+      } catch (err) {
         try {
-          agent.session.append('user/message', message, {});
+          ctx.logger?.warn?.(
+            `dsh-plugin-degen-investigator: agent "${agent.id ?? '?'}" halt landed but the report could not be committed: ${err?.message ?? err}`,
+          );
         } catch {
-          /* give up silently; the cancel already halted the turn */
+          /* give up; the cancel already halted the turn */
         }
       }
     }
   }
 
   // Capture the per-request sampling config (temperature, model, etc.).
+  // The loop dispatches this waterfall as { turn, step, signal } and the
+  // agent-event plumbing fuses in `agent`; `await next()` resolves to the
+  // final LlmCallConfig after downstream modifications.
   ctx.on('agent/request', async (payload, next) => {
     const cfg = await next();
-    if (payload?.agent) stateFor(payload.agent).lastConfig = cfg;
+    const agent = payload?.agent;
+    if (agent && cfg && typeof cfg === 'object') stateFor(agent).lastConfig = cfg;
     return cfg;
   });
 
@@ -586,18 +647,24 @@ export function apply(ctx, config) {
     if (det) handleDetection(agent, st, det, bufferKind);
   });
 
-  // Detect in tool results and track recent tool calls.
+  // Track recent tool calls and detect trigger words in tool output.
+  // Mirror the shipped `dsh-repeat-tool-reminder` discipline: drain the
+  // waterfall first (`await next()`), then act on the settled decision, and
+  // return it untouched. Acting before downstream handlers could cancel the
+  // agent underneath a still-running chain. Scanning both the raw result
+  // content and any `block` feedback covers every text that surfaced.
   ctx.on('tools/post-execute', async (exec, result, next) => {
+    const downstream = await next();
     const agent = exec?.agent;
     if (agent) {
       const st = stateFor(agent);
       st.recentToolCalls.push({ name: exec.name, args: exec.arguments, time: Date.now() });
       if (st.recentToolCalls.length > config.recentToolCalls) st.recentToolCalls.shift();
-      const resultText = extractText(result?.content);
-      const det = detectTriggerWord(resultText, triggerWords);
+      const surfaced = `${extractText(result?.content)} ${extractText(downstream?.feedback)}`;
+      const det = detectTriggerWord(surfaced, triggerWords);
       if (det) handleDetection(agent, st, det, `tool result (${exec.name})`);
     }
-    return next();
+    return downstream;
   });
 
   // Drop per-agent state when an agent is disposed.
