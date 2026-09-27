@@ -1,0 +1,4 @@
+{
+  "title": "Repetitive Degeneration Investigator",
+  "description": "Detects repetitive-token degeneration and configured trigger words in agent thinking/output, halts the agent, and prints a debug report with a cause checklist and recommended fixes."
+}

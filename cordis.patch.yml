@@ -1,0 +1,21 @@
+# dsh bundle patch: inserts this plugin into a profile's layer stack.
+- insert:
+    - id: dsh-plugin-degen-investigator
+      name: 'dsh-plugin-degen-investigator'
+      config:
+        # Words whose presence in thinking, assistant text, tool-call arguments,
+        # or tool results immediately halts the agent and prints the report.
+        triggerWords: []
+        # Repetition thresholds (a hit on any of them triggers the investigator).
+        wordRepeatThreshold: 6
+        ngramRepeatThreshold: 3
+        charRepeatThreshold: 20
+        # Cause-checklist thresholds used to auto-detect common causes.
+        temperatureHighThreshold: 0.8
+        maxTokensLowThreshold: 512
+        contextLengthHighThreshold: 200000
+        # Report sizing.
+        recentToolCalls: 5
+        contextSearchMessages: 20
+        contextSnippetChars: 240
+        reportSummary: 'Repetitive Degeneration Detected'

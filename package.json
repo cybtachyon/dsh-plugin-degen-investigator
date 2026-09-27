@@ -1,0 +1,26 @@
+{
+  "name": "dsh-plugin-degen-investigator",
+  "description": "Halts the agent on repetitive-token degeneration or configured trigger words, then prints a debug report with a cause checklist and recommended fixes.",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "locale/*.json",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "meta": {
+    "title": "Repetitive Degeneration Investigator",
+    "description": "Detects repetitive-token degeneration and trigger words in agent thinking/output, halts the agent, and prints a debug report with causes and fixes."
+  }
+}

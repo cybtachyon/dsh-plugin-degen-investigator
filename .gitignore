@@ -1,0 +1,31 @@
+# Dependencies. This package declares no runtime deps (DSH-tree packages are
+# resolved at runtime via loadDsh), but ignore any local install in case dev
+# tooling is added.
+node_modules/
+
+# Lockfiles. Not expected for a zero-dep package — if dev dependencies are
+# added, remove these lines and commit the resulting lockfile.
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Logs and local debug artifacts
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Pack and test artifacts
+*.tgz
+coverage/
+.nyc_output/
+*.lcov
+
+# Build output (the package ships raw ESM source; no build step today)
+dist/
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
